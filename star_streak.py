@@ -1,15 +1,6 @@
 #!/usr/bin/env python3
 """
-Final star streak detector with:
- - Auto-prefix detection
- - Single-file mode
- - FULL BATCH MODE (process every FITS file in folder)
-
-A streak is confirmed when:
- - There are ≥ 3 significant peaks
- - The 3rd peak occurs AFTER the first-order bump
- - Prominence > 2 × background median
- - Peak width < 150 px
+Improved star streak detector with console reporting.
 """
 
 import argparse
@@ -23,68 +14,62 @@ import csv
 
 
 # =========================================================
-# STAR STREAK DETECTION LOGIC
+# STAR STREAK DETECTION
 # =========================================================
 
 def detect_star_streak(s, profile):
-
-    # Smooth profile
     window = min(101, len(profile) - (len(profile) % 2 == 0))
     smoothed = savgol_filter(profile, window, 3)
 
     median_back = np.median(smoothed)
 
-    # Request peak_heights by specifying "height"
     peaks, props = find_peaks(
         smoothed,
-        height=median_back * 2,
-        prominence=median_back * 2,
+        height=median_back * 1.2,
+        prominence=median_back * 1.5,
         width=1,
-        distance=int(0.03 * len(s))
+        distance=int(0.02 * len(s))
     )
 
+    heights     = props["peak_heights"]
     prominences = props["prominences"]
     widths      = props["widths"]
-    heights     = props["peak_heights"]
 
-    if len(peaks) < 3:
+    if len(peaks) < 2:
         return False, peaks, smoothed, props, [False] * len(peaks)
 
-    # Identify zeroth + first-order peaks
-    sorted_idx = np.argsort(heights)[::-1]
-    zeroth_idx = sorted_idx[0]
-    first_idx  = sorted_idx[1]
+    sorted_idx  = np.argsort(heights)[::-1]
+    zeroth_idx  = sorted_idx[0]
+    first_idx   = sorted_idx[1]
 
-    zeroth_pos = peaks[zeroth_idx]
-    first_pos  = peaks[first_idx]
+    zeroth_pos  = peaks[zeroth_idx]
+    first_pos   = peaks[first_idx]
 
     valid_mask = []
-    valid_count = 2  # zeroth + first
+    has_streak = False
 
-    # Evaluate remaining peaks
-    for pk, p, w, h in zip(peaks, prominences, widths, heights):
+    for pk, prom, w, h in zip(peaks, prominences, widths, heights):
 
         if pk == zeroth_pos or pk == first_pos:
             valid_mask.append(True)
             continue
 
-        # strict streak rule
-        if (
-            pk > first_pos and
-            p > median_back * 2 and
-            w < 150
-        ):
+        after_first      = pk > first_pos
+        strong_enough    = prom > 0.7 * prominences[first_idx]
+        narrow_enough    = w < 250
+        above_background = h > median_back * 1.2
+
+        if after_first and (strong_enough or narrow_enough or above_background):
             valid_mask.append(True)
-            valid_count += 1
+            has_streak = True
         else:
             valid_mask.append(False)
 
-    streak = valid_count >= 3
-    return streak, peaks, smoothed, props, valid_mask
+    return has_streak, peaks, smoothed, props, valid_mask
 
 
 # =========================================================
-# PROCESS A SINGLE FITS FILE
+# PROCESS FILE
 # =========================================================
 
 def process_single_file(fits_path: Path, extraction_script="1Dextraction.py"):
@@ -92,112 +77,102 @@ def process_single_file(fits_path: Path, extraction_script="1Dextraction.py"):
     prefix = fits_path.stem
     fits_file = str(fits_path)
 
-    print(f"\n🚀 Processing {fits_file} (prefix: {prefix})\n")
+    print(f"\nProcessing {fits_file}")
 
-    # Run extraction
     subprocess.run([
         "python", extraction_script,
         "--fits", fits_file,
         "--prefix", prefix
     ], check=True)
 
-    # Load outputs
-    txt_path = Path(f"{prefix}_line_1d.txt")
-    png_path = Path(f"{prefix}_line_spectrum.png")
+    parent  = fits_path.parent
+    txt_path = parent / f"{prefix}_line_1d.txt"
+    png_path = parent / f"{prefix}_line_spectrum.png"
 
     arr = np.loadtxt(txt_path, skiprows=1)
-    s       = arr[:, 0]
-    profile = arr[:, 1]
+    s, profile = arr[:,0], arr[:,1]
 
     img_png = imread(png_path)
 
-    # Run streak detection
     streak, peaks, smoothed, props, valid_mask = detect_star_streak(s, profile)
 
-    # Save diagnostic visualization
-    out_png = f"{prefix}_streak_detection.png"
+    out_png = parent / f"{prefix}_streak_detection.png"
 
-    plt.figure(figsize=(12, 9))
+    # ------------------------- Plot -------------------------
+    plt.figure(figsize=(14, 10))
+    plt.suptitle(f"Streak Detection: {'YES' if streak else 'NO'}", fontsize=18)
 
-    # Extraction image
     plt.subplot(2, 1, 1)
     plt.imshow(img_png)
     plt.title(f"Extraction: {prefix}")
     plt.axis("off")
 
-    # Peaks visualization
     plt.subplot(2, 1, 2)
-    plt.plot(s, profile, alpha=0.4, label="Raw")
-    plt.plot(s, smoothed, linewidth=2, label="Smoothed")
+    plt.plot(s, profile, alpha=0.4)
+    plt.plot(s, smoothed, linewidth=2)
 
     for i, pk in enumerate(peaks):
-        color = "green" if valid_mask[i] else "red"
-        plt.axvline(s[pk], color=color, linestyle="--", alpha=0.7)
+        plt.axvline(s[pk], color="green" if valid_mask[i] else "red", linestyle="--")
 
-    plt.title(f"Streak: {'YES' if streak else 'NO'}")
     plt.xlabel("Distance (pixels)")
     plt.ylabel("Counts")
-    plt.legend()
     plt.tight_layout()
-
     plt.savefig(out_png, dpi=200)
+    plt.close()
 
-    print(f"📤 Saved: {out_png}")
+    # ---------------------- Console Logging ----------------------
 
-    # Return result tuple
+    print("\n===================== STAR STREAK REPORT =====================")
+    print(f"FILE:          {fits_path.name}")
+    print(f"STAR_STREAK:   {streak}")
+    print(f"PEAK_POSITIONS: {peaks.tolist()}")
+    print(f"VALID_MASK:     {valid_mask}")
+
+    if len(peaks) >= 2:
+        sorted_idx  = np.argsort(props['peak_heights'])[::-1]
+        zeroth_pos  = peaks[sorted_idx[0]]
+        first_pos   = peaks[sorted_idx[1]]
+        print(f"ZEROTH_ORDER_POSITION: {zeroth_pos}")
+        print(f"FIRST_ORDER_POSITION:  {first_pos}")
+    else:
+        print("Not enough peaks to determine zeroth/first order.")
+
+    print(f"OUTPUT_IMAGE:  {out_png}")
+    print("==============================================================\n")
+
     return prefix, streak
 
 
 # =========================================================
-# MAIN — SINGLE MODE + BATCH MODE
+# MAIN
 # =========================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Star streak detector with batch mode.")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--fits", required=False)
-    parser.add_argument("--batch", action="store_true",
-                        help="Process ALL .fit/.fits files in folder")
+    parser.add_argument("--batch", action="store_true")
     args = parser.parse_args()
 
-    # -------------------------
-    # BATCH MODE
-    # -------------------------
     if args.batch:
-        print("\n🔥 BATCH MODE ENABLED — Processing all FITS files...\n")
-
-        fits_files = sorted(list(Path(".").glob("*.fit")) +
-                            list(Path(".").glob("*.fits")))
-
-        if not fits_files:
-            print("❌ No FITS files found in this directory.")
-            return
-
+        fits_files = sorted(Path(".").glob("*.fits")) + sorted(Path(".").glob("*.fit"))
         results = []
-
         for f in fits_files:
             prefix, streak = process_single_file(f)
             results.append((prefix, streak))
 
-        # Save summary CSV
         with open("streak_summary.csv", "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["Prefix", "StreakDetected"])
-            writer.writerows(results)
+            csv.writer(f).writerows([["Prefix","StreakDetected"]] + results)
 
-        print("\n✅ Batch processing complete.")
-        print("📄 Summary saved to streak_summary.csv\n")
+        print("\nBatch complete! Saved streak_summary.csv\n")
         return
 
-    # -------------------------
-    # SINGLE-FILE MODE
-    # -------------------------
     if args.fits:
-        fits_path = Path(args.fits)
-        process_single_file(fits_path)
+        process_single_file(Path(args.fits))
         return
 
-    print("❌ ERROR: Provide --fits <file> or use --batch")
+    print("Provide --fits <file> or --batch")
 
 
 if __name__ == "__main__":
     main()
+
