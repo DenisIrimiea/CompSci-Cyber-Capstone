@@ -14,11 +14,13 @@ import argparse
 import subprocess
 from pathlib import Path
 import csv
+import sys
+
 import numpy as np
-from scipy.signal import savgol_filter, find_peaks
+from scipy.signal import savgol_filter
 import matplotlib.pyplot as plt
 from matplotlib.image import imread
-from astropy.io import fits
+from astropy.io import fits  # currently unused but kept in case you need it later
 
 
 # =========================================================
@@ -28,14 +30,16 @@ from astropy.io import fits
 def classify_first_order(s, profile):
     n = len(profile)
     if n < 20:
-        return "NONE", False, {"reason": "too_short", "tail_mean": 0}, np.array([]), profile
+        return "NONE", False, {"reason": "too_short", "tail_mean": 0.0}, np.array([]), profile
 
-    # Smooth safely
-    window = min(101, n - (n % 2 == 0))
+    # Smooth safely: make sure window is odd and not too large
+    window = min(101, n)
+    if window % 2 == 0:
+        window -= 1
     if window < 7:
         window = 7
-    if window % 2 == 0:
-        window += 1
+    if window > n:
+        window = n if n % 2 == 1 else n - 1
 
     smoothed = savgol_filter(profile, window_length=window, polyorder=3)
 
@@ -63,7 +67,6 @@ def classify_first_order(s, profile):
     return "FULL", False, info, np.array([]), smoothed
 
 
-
 # =========================================================
 # PROCESS A SINGLE FILE
 # =========================================================
@@ -71,23 +74,36 @@ def classify_first_order(s, profile):
 def process_single_file(fits_path: Path, extraction_script="1Dextraction.py"):
 
     prefix = fits_path.stem
-    abs_fits = fits_path.resolve()
-    abs_ext  = Path(extraction_script).resolve()
+    fits_str = str(fits_path)
 
-    print(f"\nProcessing {abs_fits}")
+    print(f"\nProcessing {fits_str}")
 
-    # Run extraction (required for 1D profile)
-    subprocess.run([
-        "python",
-        str(abs_ext),
-        "--fits", str(abs_fits),
-        "--prefix", prefix
-    ], check=True)
+    # Run extraction (required for 1D profile) using the same Python interpreter
+    subprocess.run(
+        [
+            sys.executable,
+            extraction_script,
+            "--fits", fits_str,
+            "--prefix", prefix
+        ],
+        check=True
+    )
 
-    parent = abs_fits.parent
+    # 1Dextraction.py writes files in the current working directory
+    txt_path = Path(f"{prefix}_line_1d.txt")
+    png_path = Path(f"{prefix}_line_spectrum.png")
 
-    txt_path = parent / f"{prefix}_line_1d.txt"
-    png_path = parent / f"{prefix}_line_spectrum.png"
+    if not txt_path.exists():
+        raise FileNotFoundError(
+            f"Expected 1-D spectrum file {txt_path} not found. "
+            "Make sure 1Dextraction.py ran successfully and writes outputs "
+            "in the same directory you are running partial_first_order.py from."
+        )
+
+    if not png_path.exists():
+        raise FileNotFoundError(
+            f"Expected spectrum PNG file {png_path} not found."
+        )
 
     arr = np.loadtxt(txt_path, skiprows=1)
     s = arr[:, 0]
@@ -97,7 +113,7 @@ def process_single_file(fits_path: Path, extraction_script="1Dextraction.py"):
     # CLASSIFY USING NEW SIMPLE RULE
     first_class, is_partial, info, peaks, smoothed = classify_first_order(s, profile)
 
-    out_png = parent / f"{prefix}_partial_first_order.png"
+    out_png = Path(f"{prefix}_partial_first_order.png")
 
     # Plot
     plt.figure(figsize=(14, 10))
@@ -124,7 +140,7 @@ def process_single_file(fits_path: Path, extraction_script="1Dextraction.py"):
 
     # Output
     print("\n================ FIRST ORDER REPORT ================")
-    print(f"FILE:                {abs_fits.name}")
+    print(f"FILE:                {fits_path.name}")
     print(f"FIRST_ORDER_CLASS:   {first_class}")
     print(f"PARTIAL_FIRST_ORDER: {is_partial}")
     print(f"TAIL_MEAN:           {info['tail_mean']:.2f}")
@@ -135,13 +151,14 @@ def process_single_file(fits_path: Path, extraction_script="1Dextraction.py"):
     return prefix, first_class, is_partial
 
 
-
 # =========================================================
 # MAIN
 # =========================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Simple partial first-order detector (tail rule only).")
+    parser = argparse.ArgumentParser(
+        description="Simple partial first-order detector (tail rule only)."
+    )
     parser.add_argument("--fits")
     parser.add_argument("--batch", action="store_true")
     args = parser.parse_args()

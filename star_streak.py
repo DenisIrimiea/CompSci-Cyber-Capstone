@@ -11,6 +11,7 @@ from scipy.signal import savgol_filter, find_peaks
 import matplotlib.pyplot as plt
 from matplotlib.image import imread
 import csv
+import sys
 
 
 # =========================================================
@@ -18,8 +19,15 @@ import csv
 # =========================================================
 
 def detect_star_streak(s, profile):
-    window = min(101, len(profile) - (len(profile) % 2 == 0))
-    smoothed = savgol_filter(profile, window, 3)
+    # Ensure window length is odd and not larger than profile length
+    win = min(101, len(profile))
+    if win % 2 == 0:
+        win -= 1
+    if win < 5:
+        # too short to do meaningful smoothing; treat as no streak
+        return False, np.array([]), profile, {"peak_heights": [], "prominences": [], "widths": []}, []
+
+    smoothed = savgol_filter(profile, win, 3)
 
     median_back = np.median(smoothed)
 
@@ -79,18 +87,22 @@ def process_single_file(fits_path: Path, extraction_script="1Dextraction.py"):
 
     print(f"\nProcessing {fits_file}")
 
-    subprocess.run([
-        "python", extraction_script,
-        "--fits", fits_file,
-        "--prefix", prefix
-    ], check=True)
+    # Use the same interpreter that's running this script (python3 in your case)
+    subprocess.run(
+        [
+            sys.executable, extraction_script,
+            "--fits", fits_file,
+            "--prefix", prefix
+        ],
+        check=True
+    )
 
     parent  = fits_path.parent
     txt_path = parent / f"{prefix}_line_1d.txt"
     png_path = parent / f"{prefix}_line_spectrum.png"
 
     arr = np.loadtxt(txt_path, skiprows=1)
-    s, profile = arr[:,0], arr[:,1]
+    s, profile = arr[:, 0], arr[:, 1]
 
     img_png = imread(png_path)
 
@@ -161,7 +173,7 @@ def main():
             results.append((prefix, streak))
 
         with open("streak_summary.csv", "w", newline="") as f:
-            csv.writer(f).writerows([["Prefix","StreakDetected"]] + results)
+            csv.writer(f).writerows([["Prefix", "StreakDetected"]] + results)
 
         print("\nBatch complete! Saved streak_summary.csv\n")
         return
@@ -175,4 +187,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

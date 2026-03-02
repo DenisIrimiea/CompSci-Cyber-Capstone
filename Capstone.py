@@ -4,23 +4,32 @@ import subprocess
 from pathlib import Path
 import re
 import json
+import sys  # <-- use this to get the current Python interpreter
+
 
 # ---------------------------------------------------------
 # Run helper script and capture stdout
 # ---------------------------------------------------------
 
 def run_script(script, *args):
-    cmd = ["python", script] + list(args)
+    # Use the same Python interpreter that is running Capstone.py (python3)
+    cmd = [sys.executable, script] + list(args)
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            check=False,
+            check=False,   # don't raise on non-zero exit
             timeout=60
         )
+        # If you want to debug failures, uncomment:
+        # if result.returncode != 0:
+        #     print(f"[WARN] {script} exited with {result.returncode}")
+        #     print("STDERR:\n", result.stderr)
         return True, result.stdout
     except Exception as e:
+        # If we get here, something was really wrong (e.g., script missing)
+        # Returning False lets caller know it failed.
         return False, str(e)
 
 
